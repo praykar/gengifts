@@ -220,15 +220,16 @@ def generate_story(theme, characters, age_group, elements, morals, api_key):
     - Have a clear beginning, middle, and end
     - Be engaging and calming for bedtime
     - End with a gentle, satisfying conclusion that helps children transition to sleep
+    - Begin with a title for the story on its own line, followed by the story text
     
-    Write ONLY the story text, no additional comments or explanations.
+    Format your response with just the title on the first line, followed by the story text. Do not include any additional comments or explanations.
     """
     
     # Prepare the payload
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 1024,
+            "max_new_tokens": 3072,
             "temperature": 0.7,
             "top_p": 0.9,
             "do_sample": True
@@ -239,19 +240,47 @@ def generate_story(theme, characters, age_group, elements, morals, api_key):
     response = query_huggingface_api(STORY_GENERATION_API, payload, api_key)
     
     if response and response.status_code == 200:
-        # Extract the generated story
-        story_text = response.json()[0].get("generated_text", "")
+        # Extract the generated text
+        generated_text = response.json()[0].get("generated_text", "").strip()
         
-        # Clean up the response to extract just the story
-        # This depends on the exact format returned by the model
-        story_text = re.sub(r'.*?(Once upon a time|One day|In a|There was)', r'\1', story_text, flags=re.DOTALL)
-        story_text = re.split(r'THE END|The End|the end', story_text)[0].strip()
+        # Extract just the story part by removing the prompt
+        # Find where the actual story starts after the prompt
+        story_start = generated_text.find("Title:") 
+        if story_start == -1:
+            # Try other common starting patterns
+            possible_starts = ["The ", "Once upon", "In the", "Once", "Title", "# "]
+            for start_phrase in possible_starts:
+                story_start = generated_text.find(start_phrase)
+                if story_start != -1:
+                    break
         
-        return story_text
+        if story_start != -1:
+            # Extract just the story content
+            story_text = generated_text[story_start:].strip()
+            
+            # Try to separate title and story content
+            lines = story_text.split('\n', 1)
+            
+            if len(lines) >= 2:
+                title = lines[0].strip().replace("Title:", "").replace("#", "").strip()
+                content = lines[1].strip()
+                
+                # Store title separately if desired
+                st.session_state.story_title = title
+                
+                # Format the final story with title
+                final_story = f"# {title}\n\n{content}"
+                return final_story
+            else:
+                return story_text
+        else:
+            return generated_text
     else:
         # Fallback story for demo purposes
         st.warning("Story generation API call failed. Using a sample story instead.")
         return f"""
+        # The {theme} Adventure
+        
         Once upon a time in the magical land of {theme}, there lived {characters_text}. 
         They were the best of friends who loved to explore and have adventures together.
         
@@ -829,12 +858,13 @@ elif st.session_state.current_step == 3:
         st.markdown("### Your Bedtime Story")
         
         with st.container():
-            st.markdown(f"""
-            <div class="story-card">
-                <h3>{st.session_state.story_theme}</h3>
-                <p>{st.session_state.story}</p>
-            </div>
-            """, unsafe_allow_html=True)
+            # Use st.write for better HTML/markdown compatibility
+            st.write(f"**{st.session_state.story_theme}**")
+            # Use an expander to ensure the story is fully visible
+            with st.expander("Read the full story", expanded=True):
+                # Format the story with proper line breaks
+                formatted_story = st.session_state.story.replace("\n", "<br>")
+                st.markdown(formatted_story, unsafe_allow_html=True)
             
             st.markdown("#### How do you like your story?")
             satisfaction = st.slider("Story satisfaction", 1, 5, 4)
