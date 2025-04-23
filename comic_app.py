@@ -12,10 +12,10 @@ import re
 from io import BytesIO
 #from reportlab.lib.pagesizes import A4
 #from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.units import inch
-from ebooklib import epub
+# from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
+# from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+# from reportlab.lib.units import inch
+# from ebooklib import epub
 
 # Set page configuration
 st.set_page_config(
