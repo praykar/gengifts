@@ -2,7 +2,8 @@ import streamlit as st
 import requests
 import io
 import base64
-from PIL import Image
+from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageFont
+import torch
 import os
 import json
 import time
@@ -10,13 +11,20 @@ import random
 from datetime import datetime
 import re
 from io import BytesIO
-#from reportlab.lib.pagesizes import A4
-#from reportlab.lib import colors
-# from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
-# from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-# from reportlab.lib.units import inch
-# from ebooklib import epub
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, PageBreak
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch
+from ebooklib import epub
+import threading
+from functools import lru_cache
+import concurrent.futures
+from typing import List, Tuple, Dict, Any, Optional
+import textwrap
 
+# Create a thread-local storage for models to avoid loading them multiple times
+thread_local = threading.local()
 # Set page configuration
 st.set_page_config(
     page_title="Bedtime Story Maker",
@@ -113,7 +121,6 @@ if 'saved_books' not in st.session_state:
 
 # Hugging Face API endpoints
 TEXT_TO_IMAGE_API = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-CARTOON_TRANSFORM_API = "https://api-inference.huggingface.co/models/prompthero/openjourney"
 STORY_GENERATION_API = "https://api-inference.huggingface.co/models/microsoft/Phi-3.5-mini-instruct"
 COMICS_PROMPT_API = "https://api-inference.huggingface.co/models/microsoft/Phi-3.5-mini-instruct"
 
@@ -151,48 +158,127 @@ def query_huggingface_api(api_url, payload, api_key, is_image=False):
     st.error("Failed to get a response after multiple retries")
     return None
 
-def transform_to_character(image, style, api_key):
-    """Transform a photo into a cartoon/animated character using HF API"""
-    # Convert PIL Image to bytes
-    img_byte_arr = io.BytesIO()
-    image.save(img_byte_arr, format='PNG')
-    img_bytes = img_byte_arr.getvalue()
-    
-    # Create style-specific prompt
-    style_prompts = {
-        "cartoon": "a cartoon character, simple drawing, big eyes, cute, child-friendly",
-        "anime": "an anime character, manga style, colorful, child-friendly",
-        "fairy tale": "a fairy tale character, magical, fantasy, whimsical, child-friendly",
-        "superhero": "a cute superhero character, dynamic pose, comic book style, child-friendly",
-        "animal": "an anthropomorphic animal character, cute, furry, child-friendly"
+@lru_cache(maxsize=4)  # Cache the last 4 loaded models
+def get_model(style: str) -> Tuple[Any, Any]:
+    """Get or initialize models in a thread-safe way with caching"""
+    # Map styles to model types
+    style_to_model = {
+        "anime": "face_paint_512_v2",
+        "cartoon": "paprika",
+        "fairy tale": "face_paint_512_v1",
+        "superhero": "face_paint_512_v1",
+        "animal": "face_paint_512_v1",
     }
     
-    style_prompt = style_prompts.get(style.lower(), "cartoon character, child-friendly")
+    model_name = style_to_model.get(style.lower(), "face_paint_512_v1")
     
-    # Prepare payload for the transformation
-    payload = {
-        "inputs": {
-            "image": base64.b64encode(img_bytes).decode("utf-8"),
-            "prompt": f"Transform this photo into {style_prompt}. Make it appropriate for a children's bedtime story.",
-            "negative_prompt": "scary, adult content, realistic, photorealistic, detailed face, inappropriate for children",
-            "num_inference_steps": 30,
-            "guidance_scale": 7.5
-        }
-    }
+    # Check if we have already loaded this model in this thread
+    if not hasattr(thread_local, 'models'):
+        thread_local.models = {}
     
-    # Call the API
-    response = query_huggingface_api(CARTOON_TRANSFORM_API, payload, api_key)
+    if model_name not in thread_local.models:
+        # Load the model for this thread
+        model = torch.hub.load("bryandlee/animegan2-pytorch:main", "generator", pretrained=model_name)
+        face2paint = torch.hub.load("bryandlee/animegan2-pytorch:main", "face2paint", size=512)
+        thread_local.models[model_name] = (model, face2paint)
     
-    if response:
-        # Convert response to image
-        image_bytes = response.content
-        transformed_image = Image.open(BytesIO(image_bytes))
-        return transformed_image
-    else:
-        # Fallback for demo purposes
-        st.warning("Transformation API call failed. Using original image as fallback.")
-        return image
+    return thread_local.models[model_name]
 
+def apply_style_effects(image: Image.Image, style: str) -> Image.Image:
+    """Apply style-specific post-processing effects"""
+    if style.lower() == "fairy tale":
+        # Dreamy effect for fairy tales
+        image = image.filter(ImageFilter.GaussianBlur(radius=0.5))
+        enhancer = ImageEnhance.Color(image)
+        image = enhancer.enhance(1.2)
+    elif style.lower() == "superhero":
+        # Bold look for superheroes
+        contrast = ImageEnhance.Contrast(image)
+        image = contrast.enhance(1.3)
+        brightness = ImageEnhance.Brightness(image)
+        image = brightness.enhance(1.1)
+    elif style.lower() == "animal":
+        # Softer look for animals
+        saturation = ImageEnhance.Color(image)
+        image = saturation.enhance(1.15)
+    
+    return image
+
+def transform_single_image(args: Tuple[Image.Image, str, int]) -> Tuple[int, Optional[Image.Image]]:
+    """Transform a single image with index tracking for preserving order"""
+    image, style, index = args
+    try:
+        # Resize image if too large to save memory and processing time
+        max_size = 512
+        if max(image.size) > max_size:
+            # Calculate new dimensions while preserving aspect ratio
+            if image.width > image.height:
+                new_width = max_size
+                new_height = int(image.height * (max_size / image.width))
+            else:
+                new_height = max_size
+                new_width = int(image.width * (max_size / image.height))
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+        
+        # Get model for this style
+        model, face2paint = get_model(style)
+        
+        # Use GPU if available
+        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        model.to(device)
+        
+        # Transform the image
+        with torch.no_grad():  # Disable gradient calculation for inference
+            transformed = face2paint(model, image)
+        
+        # Apply style-specific effects
+        transformed = apply_style_effects(transformed, style)
+        
+        return index, transformed
+    
+    except Exception as e:
+        st.warning(f"Image transformation failed: {str(e)}")
+        return index, None
+
+def transform_to_character(images: List[Image.Image], style: str, api_key: str = None) -> List[Image.Image]:
+    """Transform multiple photos into cartoon/animated characters in parallel"""
+    # Create progress indicator
+    progress_placeholder = st.empty()
+    progress_bar = st.progress(0)
+    
+    # Prepare arguments for parallel processing
+    args = [(img, style, i) for i, img in enumerate(images)]
+    results = [None] * len(images)
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(images))) as executor:
+        # Submit all tasks
+        future_to_idx = {executor.submit(transform_single_image, arg): i for i, arg in enumerate(args)}
+        
+        # Process results as they complete
+        for i, future in enumerate(concurrent.futures.as_completed(future_to_idx)):
+            original_idx = future_to_idx[future]
+            try:
+                idx, transformed_img = future.result()
+                if transformed_img:
+                    results[idx] = transformed_img
+                else:
+                    # Fallback to original if transformation failed
+                    results[idx] = images[idx]
+            except Exception as exc:
+                st.warning(f"Image {original_idx} generated an exception: {exc}")
+                results[original_idx] = images[original_idx]
+            
+            # Update progress
+            progress = (i + 1) / len(images)
+            progress_bar.progress(progress)
+            progress_placeholder.text(f"Transforming images: {i+1}/{len(images)} complete")
+    
+    # Clear progress indicators
+    progress_placeholder.empty()
+    progress_bar.empty()
+    
+    return results
+    
 def generate_story(theme, characters, age_group, elements, morals, api_key):
     """Generate a bedtime story using HF LLM API"""
     # Craft a detailed prompt based on user inputs
@@ -222,7 +308,7 @@ def generate_story(theme, characters, age_group, elements, morals, api_key):
     - End with a gentle, satisfying conclusion that helps children transition to sleep
     - Begin with a title for the story on its own line, followed by the story text
     
-    Format your response with just the title on the first line, followed by the story text. Do not include any additional comments or explanations.
+    Format your response with the Title on the first line, followed by the story text. Do not include any additional comments or explanations.
     """
     
     # Prepare the payload
@@ -294,17 +380,134 @@ def generate_story(theme, characters, age_group, elements, morals, api_key):
         That night, as they drifted off to sleep, they dreamed of their next wonderful adventure together.
         """
 
-def generate_comic_prompts(story, num_panels, api_key):
-    """Break down a story into prompts for comic panels using LLM"""
+# Updated functions for parallel comic panel generation with dialogue inpainting
+
+def generate_comic_panel_with_retry(scene_description, dialogue, style, character_names, api_key, index):
+    """Generate a comic panel with embedded dialogue using Text-to-Image API with retries"""
+    # Prepare a detailed prompt for the image generation that includes dialogue instructions
+    style_descriptions = {
+        "colorful cartoon": "bright colors, simple shapes, cartoon style, child-friendly",
+        "classic comic": "comic book style, clear lines, primary colors, classic look",
+        "watercolor": "soft watercolor style, gentle colors, dreamy appearance",
+        "sketch": "hand-drawn sketch style, pencil lines, simple coloring",
+        "manga": "manga/anime style, expressive characters, dynamic composition"
+    }
+    
+    style_desc = style_descriptions.get(style.lower(), "cartoon style")
+    character_desc = ", ".join(character_names) if character_names else "characters"
+    
+    # Create a prompt that includes instructions for dialogue integration
     prompt = f"""
-    I have a children's bedtime story that I want to turn into a {num_panels}-panel comic book.
+    A children's storybook comic panel in {style_desc} showing: {scene_description}
+    The panel should include speech bubbles or caption boxes containing this dialogue: "{dialogue}"
+    The speech bubbles should be clearly visible with black text on white background.
+    Include characters named: {character_desc}.
+    The image should be child-appropriate, colorful, and engaging for kids.
+    """
+    
+    # Prepare the payload
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "negative_prompt": "blurry text, illegible writing, distorted speech bubbles, adult content",
+            "num_inference_steps": 30,
+            "guidance_scale": 7.5
+        }
+    }
+    
+    # Add retry logic for API calls
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Call the API
+            response = query_huggingface_api(TEXT_TO_IMAGE_API, payload, api_key)
+            
+            if response and response.status_code == 200:
+                # Convert response to image
+                image_bytes = response.content
+                panel_image = Image.open(BytesIO(image_bytes))
+                return index, panel_image, scene_description, dialogue
+            else:
+                # Sleep before retry to avoid rate limits
+                time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"Error generating panel {index}: {str(e)}")
+            time.sleep(2 * (attempt + 1))
+    
+    # Fallback for demo purposes if all retries fail
+    print(f"Panel generation failed for panel {index}. Using placeholder image.")
+    placeholder = Image.new('RGB', (800, 600), color=(random.randint(200, 255), random.randint(200, 255), random.randint(200, 255)))
+    return index, placeholder, scene_description, dialogue
+
+def generate_comic_panels_parallel(panel_prompts, character_names, style, api_key, max_workers=3):
+    """Generate comic panels in parallel with controlled concurrency"""
+    comic_panels = []
+    results = [None] * len(panel_prompts)
+    
+    # Set up a progress bar
+    progress_bar = st.progress(0)
+    progress_text = st.empty()
+    
+    # Process panels in parallel with limited concurrency
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks
+        futures = []
+        for i, panel_data in enumerate(panel_prompts):
+            scene = panel_data['scene']
+            dialogue = panel_data['dialogue']
+            
+            # Submit the task and store the future
+            future = executor.submit(
+                generate_comic_panel_with_retry,
+                scene_description=scene,
+                dialogue=dialogue,
+                style=style,
+                character_names=character_names,
+                api_key=api_key,
+                index=i
+            )
+            futures.append(future)
+        
+        # Process results as they complete
+        for i, future in enumerate(concurrent.futures.as_completed(futures)):
+            try:
+                # Get the result
+                index, panel_image, scene, dialogue = future.result()
+                results[index] = (panel_image, scene, dialogue)
+                
+                # Update progress
+                progress = (i + 1) / len(panel_prompts)
+                progress_bar.progress(progress)
+                progress_text.write(f"Generated panel {i+1}/{len(panel_prompts)}...")
+                
+                # Add a small delay between API calls to avoid rate limiting
+                time.sleep(1.5)
+            except Exception as e:
+                st.warning(f"Error processing panel: {str(e)}")
+    
+    # Clear progress indicators
+    progress_text.empty()
+    progress_bar.empty()
+    
+    # Make sure results are in the correct order
+    for result in results:
+        if result is not None:
+            comic_panels.append(result)
+    
+    return comic_panels
+
+def generate_comic_prompts(story, num_panels, api_key):
+    """Break down a story into prompts for comic panels using LLM with improved dialogue extraction"""
+    prompt = f"""
+    I have a children's bedtime story that I want to turn into a {num_panels}-panel comic book with dialogue bubbles.
     Please break this story into exactly {num_panels} key scenes that would make good comic panels.
     
     For each panel, provide:
-    1. A brief description of what's happening (visual scene)
-    2. Any dialogue that should appear in the panel
+    1. 'scene': A detailed visual description of what's happening (setting, characters, actions)
+    2. 'dialogue': Short, direct dialogue text that should appear in speech bubbles or caption boxes in the panel (keep this under 20 words)
     
     Format your response as a JSON array of objects with keys 'scene' and 'dialogue'.
+    Make sure the dialogue is child-friendly, engaging, and short enough to fit in speech bubbles.
     
     Here's the story:
     {story}
@@ -314,7 +517,7 @@ def generate_comic_prompts(story, num_panels, api_key):
     payload = {
         "inputs": prompt,
         "parameters": {
-            "max_new_tokens": 1024,
+            "max_new_tokens": 3072,
             "temperature": 0.7,
             "return_full_text": False
         }
@@ -349,16 +552,122 @@ def generate_comic_prompts(story, num_panels, api_key):
         end_idx = min(start_idx + panel_size, len(sentences))
         panel_text = " ".join(sentences[start_idx:end_idx])
         
+        # Extract a potential dialogue (text in quotes if available)
+        dialogue_match = re.search(r'"([^"]+)"', panel_text)
+        dialogue = dialogue_match.group(1) if dialogue_match else "..."
+        
         panels_data.append({
             "scene": f"Panel showing: {panel_text}",
-            "dialogue": panel_text
+            "dialogue": dialogue
         })
     
     return panels_data
 
-def generate_comic_panel(scene_description, character_images, style, api_key):
-    """Generate a comic panel based on scene description using HF API"""
-    # Prepare a detailed prompt for the image generation
+def add_dialogue_to_panel(image, dialogue, style="speech", position="top"):
+    """
+    Add dialogue overlay to a comic panel image
+    
+    Args:
+        image: PIL Image object
+        dialogue: Text to add to the image
+        style: 'speech' for speech bubble or 'caption' for caption box
+        position: Where to place the dialogue ('top', 'bottom', 'auto')
+    
+    Returns:
+        PIL Image with dialogue added
+    """
+    if not dialogue or dialogue.strip() == "":
+        return image
+    
+    # Create a copy of the image to avoid modifying the original
+    panel_with_dialogue = image.copy()
+    draw = ImageDraw.Draw(panel_with_dialogue)
+    
+    # Try to load a font, fall back to default if not available
+    try:
+        font = ImageFont.truetype("Arial.ttf", 24)
+    except IOError:
+        font = ImageFont.load_default()
+    
+    # Wrap text to fit within the image width
+    margin = 20
+    max_width = image.width - 2 * margin
+    wrapped_text = textwrap.fill(dialogue, width=max_width // 10)  # Approximate character width
+    
+    # Calculate text size
+    try:
+        text_bbox = draw.textbbox((0, 0), wrapped_text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+    except AttributeError:
+        # Fallback for older PIL versions
+        text_width, text_height = draw.textsize(wrapped_text, font=font)
+    
+    # Determine position
+    if position == "auto":
+        # Use image analysis to find suitable position (simplified version)
+        # For now, default to top
+        position = "top"
+    
+    padding = 10
+    bubble_width = text_width + 2 * padding
+    bubble_height = text_height + 2 * padding
+    
+    if position == "top":
+        bubble_x = (image.width - bubble_width) // 2
+        bubble_y = margin
+    else:  # bottom
+        bubble_x = (image.width - bubble_width) // 2
+        bubble_y = image.height - margin - bubble_height
+    
+    # Draw the bubble or caption box
+    if style == "speech":
+        # Speech bubble (rounded rectangle)
+        draw.rounded_rectangle(
+            [bubble_x, bubble_y, bubble_x + bubble_width, bubble_y + bubble_height],
+            radius=15,
+            fill=(255, 255, 255),
+            outline=(0, 0, 0),
+            width=2
+        )
+        
+        # Add a little triangle for speech bubble pointer
+        if position == "top":
+            # Pointer at bottom of bubble
+            pointer_points = [
+                (bubble_x + bubble_width // 2, bubble_y + bubble_height),
+                (bubble_x + bubble_width // 2 - 10, bubble_y + bubble_height + 15),
+                (bubble_x + bubble_width // 2 + 10, bubble_y + bubble_height)
+            ]
+        else:
+            # Pointer at top of bubble
+            pointer_points = [
+                (bubble_x + bubble_width // 2, bubble_y),
+                (bubble_x + bubble_width // 2 - 10, bubble_y - 15),
+                (bubble_x + bubble_width // 2 + 10, bubble_y)
+            ]
+            
+        draw.polygon(pointer_points, fill=(255, 255, 255), outline=(0, 0, 0))
+    else:
+        # Caption box (rectangle)
+        draw.rectangle(
+            [bubble_x, bubble_y, bubble_x + bubble_width, bubble_y + bubble_height],
+            fill=(255, 255, 255),
+            outline=(0, 0, 0),
+            width=2
+        )
+    
+    # Draw the text
+    text_x = bubble_x + padding
+    text_y = bubble_y + padding
+    draw.text((text_x, text_y), wrapped_text, font=font, fill=(0, 0, 0))
+    
+    return panel_with_dialogue
+
+# Modified version of generate_comic_panel_with_retry to use dialogue overlay
+def generate_comic_panel_with_overlay(scene_description, dialogue, style, character_names, api_key, index):
+    """Generate a comic panel and overlay dialogue with speech bubbles"""
+    # First generate the panel without dialogue in the prompt
     style_descriptions = {
         "colorful cartoon": "bright colors, simple shapes, cartoon style, child-friendly",
         "classic comic": "comic book style, clear lines, primary colors, classic look",
@@ -368,35 +677,60 @@ def generate_comic_panel(scene_description, character_images, style, api_key):
     }
     
     style_desc = style_descriptions.get(style.lower(), "cartoon style")
+    character_desc = ", ".join(character_names) if character_names else "characters"
     
+    # Simplify prompt to focus on scene without dialogue instructions
     prompt = f"""
-    A children's storybook illustration in {style_desc} showing: {scene_description}
+    A children's storybook comic panel in {style_desc} showing: {scene_description}
+    Include characters named: {character_desc}.
     The image should be child-appropriate, colorful, and engaging for kids.
+    Leave space at the top or bottom for speech bubbles.
     """
     
     # Prepare the payload
     payload = {
         "inputs": prompt,
         "parameters": {
-            #"negative_prompt": "scary, adult content, realistic, photorealistic, detailed faces, inappropriate for children",
+            "negative_prompt": "text, writing, speech bubbles, words, labels",
             "num_inference_steps": 30,
             "guidance_scale": 7.5
         }
     }
     
-    # Call the API
-    response = query_huggingface_api(TEXT_TO_IMAGE_API, payload, api_key)
+    # Add retry logic for API calls
+    max_retries = 3
+    panel_image = None
     
-    if response and response.status_code == 200:
-        # Convert response to image
-        image_bytes = response.content
-        panel_image = Image.open(BytesIO(image_bytes))
-        return panel_image
-    else:
-        # Fallback for demo purposes
-        st.warning("Panel generation API call failed. Using a placeholder image.")
-        placeholder = Image.new('RGB', (800, 600), color=(random.randint(200, 255), random.randint(200, 255), random.randint(200, 255)))
-        return placeholder
+    for attempt in range(max_retries):
+        try:
+            # Call the API
+            response = query_huggingface_api(TEXT_TO_IMAGE_API, payload, api_key)
+            
+            if response and response.status_code == 200:
+                # Convert response to image
+                image_bytes = response.content
+                panel_image = Image.open(BytesIO(image_bytes))
+                break
+            else:
+                # Sleep before retry
+                time.sleep(2 * (attempt + 1))
+        except Exception as e:
+            print(f"Error generating panel {index}: {str(e)}")
+            time.sleep(2 * (attempt + 1))
+    
+    # Fallback for demo purposes
+    if panel_image is None:
+        print(f"Panel generation failed for panel {index}. Using placeholder image.")
+        panel_image = Image.new('RGB', (800, 600), color=(random.randint(200, 255), random.randint(200, 255), random.randint(200, 255)))
+    
+    # Add dialogue with speech bubbles
+    if dialogue and dialogue.strip():
+        # Determine if this is a character speaking or narrator
+        is_dialogue = '"' in dialogue or "'" in dialogue
+        style_type = "speech" if is_dialogue else "caption"
+        panel_image = add_dialogue_to_panel(panel_image, dialogue, style=style_type, position="top" if is_dialogue else "bottom")
+    
+    return index, panel_image, scene_description, dialogue
 
 def generate_cover_image(title, theme, api_key):
     """Generate a cover image for the storybook"""
@@ -781,12 +1115,12 @@ elif st.session_state.current_step == 2:
         
         # Show a loading spinner while processing
         with st.spinner("Transforming photos into characters... This may take a minute."):
-            # Process each image to create a character
-            st.session_state.character_images = []
-            for img in st.session_state.uploaded_images:
-                with st.status("Processing image..."):
-                    char_img = transform_to_character(img, style=selected_style.lower(), api_key=st.session_state.hf_api_key)
-                    st.session_state.character_images.append(char_img)
+            # Process all images in parallel
+            transformed_images = transform_to_character(
+                st.session_state.uploaded_images, 
+                style=selected_style.lower()
+            )
+            st.session_state.character_images = transformed_images
         
         # Display the transformed characters
         st.success("Character transformation complete!")
@@ -893,7 +1227,7 @@ elif st.session_state.current_step == 3:
             if not st.session_state.story:
                 st.error("Please generate a story first.")
             else:
-                # Get book title and author for next step
+                # Get book title an author for next step
                 st.session_state.book_title = f"{st.session_state.story_theme} Adventure"
                 set_step(4)
 
@@ -932,36 +1266,14 @@ elif st.session_state.current_step == 4:
                 api_key=st.session_state.hf_api_key
             )
             
-            # Generate images for each panel
-            st.session_state.comic_panels = []
-            
-            # Set up a progress bar
-            progress_bar = st.progress(0)
-            
-            for i, panel_data in enumerate(panel_prompts):
-                scene = panel_data['scene']
-                dialogue = panel_data['dialogue']
-                
-                progress_text = st.empty()
-                progress_text.write(f"Generating panel {i+1}/{len(panel_prompts)}: {scene[:50]}...")
-                
-                # Generate the panel image
-                panel_image = generate_comic_panel(
-                    scene_description=scene,
-                    character_images=st.session_state.character_images,
-                    style=st.session_state.comic_style,
-                    api_key=st.session_state.hf_api_key
-                )
-                
-                # Store the panel data
-                st.session_state.comic_panels.append((panel_image, scene, dialogue))
-                
-                # Update progress
-                progress_bar.progress((i + 1) / len(panel_prompts))
-            
-            # Clear progress messages
-            progress_text.empty()
-            progress_bar.empty()
+            # Generate images for each panel using parallel processing
+            st.session_state.comic_panels = generate_comic_panels_parallel(
+                panel_prompts=panel_prompts,
+                character_names=st.session_state.character_names,
+                style=st.session_state.comic_style,
+                api_key=st.session_state.hf_api_key,
+                max_workers=3  # Adjust based on API rate limits
+            )
             
             # Generate cover image last
             st.session_state.cover_image = generate_cover_image(
