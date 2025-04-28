@@ -1131,7 +1131,7 @@ with st.sidebar:
     st.markdown("Made with ❤️ for bedtime adventures")
 
 # Check if API key is provided before allowing further actions
-if not st.session_state.hf_api_key and st.session_state.current_step > 1:
+if not st.session_state.hf_api_key and st.session_state.current_step > 2:
     st.warning("Please enter your Hugging Face API Key in the sidebar to continue.")
     set_step(1)
 
