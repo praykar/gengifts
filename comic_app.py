@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import io
 import base64
-from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageFont
+from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageFont, ImageFile
 import torch
 import os
 import json
@@ -22,7 +22,8 @@ from functools import lru_cache
 import concurrent.futures
 from typing import List, Tuple, Dict, Any, Optional
 import textwrap
-
+import numpy as np
+import scipy.ndimage
 # Create a thread-local storage for models to avoid loading them multiple times
 thread_local = threading.local()
 # Set page configuration
