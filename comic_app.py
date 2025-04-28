@@ -35,6 +35,7 @@ import numpy as np
 import scipy.ndimage
 import dlib
 import collections
+import bz2
 # Create a thread-local storage for models to avoid loading them multiple times
 thread_local = threading.local()
 # Set page configuration
@@ -218,11 +219,26 @@ def apply_style_effects(image: Image.Image, style: str) -> Image.Image:
 
 def get_dlib_face_detector(predictor_path: str = "shape_predictor_68_face_landmarks.dat"):
 
+    # Download the model if needed
     if not os.path.isfile(predictor_path):
-        model_file = "shape_predictor_68_face_landmarks.dat.bz2"
-        os.system(f"wget http://dlib.net/files/{model_file}")
-        os.system(f"bzip2 -dk {model_file}")
+        model_url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+        bz2_path = f"{predictor_path}.bz2"
+        
+        # 1. Download with requests
+        print("Downloading model...")
+        response = requests.get(model_url, timeout=10)
+        with open(bz2_path, "wb") as f:
+            f.write(response.content)
+        
+        # 2. Extract using bz2 module
+        print("Extracting model...")
+        with bz2.BZ2File(bz2_path) as fr, open(predictor_path, "wb") as fw:
+            fw.write(fr.read())
+        
+        # Clean up .bz2 file
+        os.remove(bz2_path)
 
+    # Initialize detector and predictor
     detector = dlib.get_frontal_face_detector()
     shape_predictor = dlib.shape_predictor(predictor_path)
 
