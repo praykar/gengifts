@@ -184,15 +184,15 @@ def get_model(style: str) -> Tuple[Any, Any]:
     }
     
     model_name = style_to_model.get(style.lower(), "face_paint_512_v1")
-    
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     # Check if we have already loaded this model in this thread
     if not hasattr(thread_local, 'models'):
         thread_local.models = {}
     
     if model_name not in thread_local.models:
         # Load the model for this thread
-        model = torch.hub.load("bryandlee/animegan2-pytorch:main", "generator", pretrained=model_name)
-        face2paint = torch.hub.load("bryandlee/animegan2-pytorch:main", "face2paint", size=512)
+        model = torch.hub.load("bryandlee/animegan2-pytorch:main", "generator", device=device).eval()
+        face2paint = torch.hub.load("bryandlee/animegan2-pytorch:main", "face2paint", device=device)
         thread_local.models[model_name] = (model, face2paint)
     
     return thread_local.models[model_name]
