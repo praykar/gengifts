@@ -319,7 +319,7 @@ def transform_single_image(args: Tuple[Image.Image, str, int]) -> Tuple[int, Opt
         # Transform the image
         with torch.no_grad():  # Disable gradient calculation for inference
             face = align_and_crop_face(image, landmark, expand=1.3)
-            transformed = face2paint(model, face, size=512)
+            transformed = face2paint(model, face)
         
         # Apply style-specific effects
         transformed = apply_style_effects(transformed, style)
@@ -328,7 +328,7 @@ def transform_single_image(args: Tuple[Image.Image, str, int]) -> Tuple[int, Opt
     
     except Exception as e:
         st.warning(f"Image transformation failed: {str(e)}")
-        return index, None
+        return index, align_and_crop_face(image, landmark, expand=1.3)
 
 def transform_to_character(images: List[Image.Image], style: str, api_key: str = None) -> List[Image.Image]:
     """Transform multiple photos into cartoon/animated characters in parallel"""
