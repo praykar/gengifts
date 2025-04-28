@@ -29,10 +29,12 @@ from ebooklib import epub
 import threading
 from functools import lru_cache
 import concurrent.futures
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Any, Optional, Union
 import textwrap
 import numpy as np
 import scipy.ndimage
+import dlib
+import collections
 # Create a thread-local storage for models to avoid loading them multiple times
 thread_local = threading.local()
 # Set page configuration
@@ -213,6 +215,28 @@ def apply_style_effects(image: Image.Image, style: str) -> Image.Image:
         image = saturation.enhance(1.15)
     
     return image
+
+def get_dlib_face_detector(predictor_path: str = "shape_predictor_68_face_landmarks.dat"):
+
+    if not os.path.isfile(predictor_path):
+        model_file = "shape_predictor_68_face_landmarks.dat.bz2"
+        os.system(f"wget http://dlib.net/files/{model_file}")
+        os.system(f"bzip2 -dk {model_file}")
+
+    detector = dlib.get_frontal_face_detector()
+    shape_predictor = dlib.shape_predictor(predictor_path)
+
+    def detect_face_landmarks(img: Union[Image.Image, np.ndarray]):
+        if isinstance(img, Image.Image):
+            img = np.array(img)
+        faces = []
+        dets = detector(img)
+        for d in dets:
+            shape = shape_predictor(img, d)
+            faces.append(np.array([[v.x, v.y] for v in shape.parts()]))
+        return faces
+    
+    return detect_face_landmarks
     
 def align_and_crop_face(
     img: Image.Image,
@@ -318,7 +342,10 @@ def transform_single_image(args: Tuple[Image.Image, str, int]) -> Tuple[int, Opt
         
         # Transform the image
         with torch.no_grad():  # Disable gradient calculation for inference
-            face = align_and_crop_face(image, landmark, expand=1.3)
+            face_detector = get_dlib_face_detector()
+            landmarks = face_detector(image)
+            for landmark in landmarks:
+                face = align_and_crop_face(img, landmark, expand=1.3)
             transformed = face2paint(model, face)
         
         # Apply style-specific effects
@@ -328,7 +355,7 @@ def transform_single_image(args: Tuple[Image.Image, str, int]) -> Tuple[int, Opt
     
     except Exception as e:
         st.warning(f"Image transformation failed: {str(e)}")
-        return index, align_and_crop_face(image, landmark, expand=1.3)
+        return index, None
 
 def transform_to_character(images: List[Image.Image], style: str, api_key: str = None) -> List[Image.Image]:
     """Transform multiple photos into cartoon/animated characters in parallel"""
