@@ -190,6 +190,55 @@ def get_model(style: str) -> Tuple[Any, Any]:
     
     return thread_local.models[model_name]
 
+def extract_cartoon_face(original_image, transformed_image, padding_factor=0.5):
+    """
+    Extracts just the face area from the transformed cartoon image.
+    
+    Args:
+        original_image: The original input image (for face detection)
+        transformed_image: The cartoon-transformed full image
+        padding_factor: Factor to expand the face bounding box by (0.5 = 50% padding)
+    
+    Returns:
+        Image.Image: Cropped face from the cartoon image, or full image if no face detected
+    """
+    # Get face detector function
+    face_detector = get_dlib_face_detector()
+    
+    # Detect faces in original image
+    faces = face_detector(original_image)
+    
+    if not faces or len(faces) == 0:
+        # No faces detected, return the full transformed image
+        return transformed_image
+    
+    # Use the first detected face (assuming main subject)
+    face = faces[0]
+    
+    # Calculate face bounding box
+    min_x = np.min(face[:, 0])
+    min_y = np.min(face[:, 1])
+    max_x = np.max(face[:, 0])
+    max_y = np.max(face[:, 1])
+    
+    # Add padding
+    width = max_x - min_x
+    height = max_y - min_y
+    padding_x = int(width * padding_factor)
+    padding_y = int(height * padding_factor)
+    
+    # Ensure we stay within image boundaries
+    img_width, img_height = transformed_image.size
+    crop_x1 = max(0, min_x - padding_x)
+    crop_y1 = max(0, min_y - padding_y)
+    crop_x2 = min(img_width, max_x + padding_x)
+    crop_y2 = min(img_height, max_y + padding_y)
+    
+    # Crop the face from the transformed image
+    face_crop = transformed_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    
+    return face_crop
+    
 # Improved image transformation function without threading
 def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
     """Transform photos into cartoon characters with memory optimization"""
@@ -247,12 +296,17 @@ def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
                     image,
                     size=512
                 )
+
             
             # Apply some basic enhancement
             enhancer = ImageEnhance.Color(transformed)
             transformed = enhancer.enhance(1.2)  # Slightly boost colors
             
-            transformed_images.append(transformed)
+            # Extract just the face from the transformed image
+            face_only = extract_cartoon_face(original_image, transformed)
+            
+            # Add to results
+            transformed_images.append(face_only)  # Store face-only result
             
             # Force garbage collection after each transformation
             gc.collect()
