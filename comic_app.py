@@ -1085,8 +1085,8 @@ if st.session_state.current_step == 1:
     if st.button("Continue to Character Creation", key="btn_to_step2"):
         if not st.session_state.uploaded_images:
             st.error("Please upload at least one photo to continue.")
-        elif not st.session_state.hf_api_key:
-            st.error("Please enter your Hugging Face API Key in the sidebar.")
+        # elif not st.session_state.hf_api_key:
+        #     st.error("Please enter your Hugging Face API Key in the sidebar.")
         else:
             set_step(2)
 
