@@ -197,220 +197,170 @@ def get_model(style: str) -> Tuple[Any, Any]:
     
     return thread_local.models[model_name]
 
-def apply_style_effects(image: Image.Image, style: str) -> Image.Image:
-    """Apply style-specific post-processing effects"""
-    if style.lower() == "fairy tale":
-        # Dreamy effect for fairy tales
-        image = image.filter(ImageFilter.GaussianBlur(radius=0.5))
-        enhancer = ImageEnhance.Color(image)
-        image = enhancer.enhance(1.2)
-    elif style.lower() == "superhero":
-        # Bold look for superheroes
-        contrast = ImageEnhance.Contrast(image)
-        image = contrast.enhance(1.3)
-        brightness = ImageEnhance.Brightness(image)
-        image = brightness.enhance(1.1)
-    elif style.lower() == "animal":
-        # Softer look for animals
-        saturation = ImageEnhance.Color(image)
-        image = saturation.enhance(1.15)
-    
-    return image
-
-def get_dlib_face_detector(predictor_path: str = "shape_predictor_68_face_landmarks.dat"):
-
-    # Download the model if needed
-    if not os.path.isfile(predictor_path):
-        model_url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
-        bz2_path = f"{predictor_path}.bz2"
-        
-        # 1. Download with requests
-        print("Downloading model...")
-        response = requests.get(model_url, timeout=10)
-        with open(bz2_path, "wb") as f:
-            f.write(response.content)
-        
-        # 2. Extract using bz2 module
-        print("Extracting model...")
-        with bz2.BZ2File(bz2_path) as fr, open(predictor_path, "wb") as fw:
-            fw.write(fr.read())
-        
-        # Clean up .bz2 file
-        os.remove(bz2_path)
-
-    # Initialize detector and predictor
-    detector = dlib.get_frontal_face_detector()
-    shape_predictor = dlib.shape_predictor(predictor_path)
-
-    def detect_face_landmarks(img: Union[Image.Image, np.ndarray]):
-        if isinstance(img, Image.Image):
-            img = np.array(img)
-        faces = []
-        dets = detector(img)
-        for d in dets:
-            shape = shape_predictor(img, d)
-            faces.append(np.array([[v.x, v.y] for v in shape.parts()]))
-        return faces
-    
-    return detect_face_landmarks
-    
-def align_and_crop_face(
-    img: Image.Image,
-    landmarks: np.ndarray,
-    expand: float = 1.0,
-    output_size: int = 1024, 
-    transform_size: int = 4096,
-    enable_padding: bool = True,
-):
-    # Parse landmarks.
-    # pylint: disable=unused-variable
-    lm = landmarks
-    lm_chin          = lm[0  : 17]  # left-right
-    lm_eyebrow_left  = lm[17 : 22]  # left-right
-    lm_eyebrow_right = lm[22 : 27]  # left-right
-    lm_nose          = lm[27 : 31]  # top-down
-    lm_nostrils      = lm[31 : 36]  # top-down
-    lm_eye_left      = lm[36 : 42]  # left-clockwise
-    lm_eye_right     = lm[42 : 48]  # left-clockwise
-    lm_mouth_outer   = lm[48 : 60]  # left-clockwise
-    lm_mouth_inner   = lm[60 : 68]  # left-clockwise
-
-    # Calculate auxiliary vectors.
-    eye_left     = np.mean(lm_eye_left, axis=0)
-    eye_right    = np.mean(lm_eye_right, axis=0)
-    eye_avg      = (eye_left + eye_right) * 0.5
-    eye_to_eye   = eye_right - eye_left
-    mouth_left   = lm_mouth_outer[0]
-    mouth_right  = lm_mouth_outer[6]
-    mouth_avg    = (mouth_left + mouth_right) * 0.5
-    eye_to_mouth = mouth_avg - eye_avg
-
-    # Choose oriented crop rectangle.
-    x = eye_to_eye - np.flipud(eye_to_mouth) * [-1, 1]
-    x /= np.hypot(*x)
-    x *= max(np.hypot(*eye_to_eye) * 2.0, np.hypot(*eye_to_mouth) * 1.8)
-    x *= expand
-    y = np.flipud(x) * [-1, 1]
-    c = eye_avg + eye_to_mouth * 0.1
-    quad = np.stack([c - x - y, c - x + y, c + x + y, c + x - y])
-    qsize = np.hypot(*x) * 2
-
-    # Shrink.
-    shrink = int(np.floor(qsize / output_size * 0.5))
-    if shrink > 1:
-        rsize = (int(np.rint(float(img.size[0]) / shrink)), int(np.rint(float(img.size[1]) / shrink)))
-        img = img.resize(rsize, PIL.Image.ANTIALIAS)
-        quad /= shrink
-        qsize /= shrink
-
-    # Crop.
-    border = max(int(np.rint(qsize * 0.1)), 3)
-    crop = (int(np.floor(min(quad[:,0]))), int(np.floor(min(quad[:,1]))), int(np.ceil(max(quad[:,0]))), int(np.ceil(max(quad[:,1]))))
-    crop = (max(crop[0] - border, 0), max(crop[1] - border, 0), min(crop[2] + border, img.size[0]), min(crop[3] + border, img.size[1]))
-    if crop[2] - crop[0] < img.size[0] or crop[3] - crop[1] < img.size[1]:
-        img = img.crop(crop)
-        quad -= crop[0:2]
-
-    # Pad.
-    pad = (int(np.floor(min(quad[:,0]))), int(np.floor(min(quad[:,1]))), int(np.ceil(max(quad[:,0]))), int(np.ceil(max(quad[:,1]))))
-    pad = (max(-pad[0] + border, 0), max(-pad[1] + border, 0), max(pad[2] - img.size[0] + border, 0), max(pad[3] - img.size[1] + border, 0))
-    if enable_padding and max(pad) > border - 4:
-        pad = np.maximum(pad, int(np.rint(qsize * 0.3)))
-        img = np.pad(np.float32(img), ((pad[1], pad[3]), (pad[0], pad[2]), (0, 0)), 'reflect')
-        h, w, _ = img.shape
-        y, x, _ = np.ogrid[:h, :w, :1]
-        mask = np.maximum(1.0 - np.minimum(np.float32(x) / pad[0], np.float32(w-1-x) / pad[2]), 1.0 - np.minimum(np.float32(y) / pad[1], np.float32(h-1-y) / pad[3]))
-        blur = qsize * 0.02
-        img += (scipy.ndimage.gaussian_filter(img, [blur, blur, 0]) - img) * np.clip(mask * 3.0 + 1.0, 0.0, 1.0)
-        img += (np.median(img, axis=(0,1)) - img) * np.clip(mask, 0.0, 1.0)
-        img = PIL.Image.fromarray(np.uint8(np.clip(np.rint(img), 0, 255)), 'RGB')
-        quad += pad[:2]
-
-    # Transform.
-    img = img.transform((transform_size, transform_size), PIL.Image.QUAD, (quad + 0.5).flatten(), PIL.Image.BILINEAR)
-    if output_size < transform_size:
-        img = img.resize((output_size, output_size), PIL.Image.ANTIALIAS)
-
-    return img
-    
-def transform_single_image(args: Tuple[Image.Image, str, int]) -> Tuple[int, Optional[Image.Image]]:
-    """Transform a single image with index tracking for preserving order"""
-    image, style, index = args
-    try:
-        # Resize image if too large to save memory and processing time
-        max_size = 512
-        if max(image.size) > max_size:
-            # Calculate new dimensions while preserving aspect ratio
-            if image.width > image.height:
-                new_width = max_size
-                new_height = int(image.height * (max_size / image.width))
-            else:
-                new_height = max_size
-                new_width = int(image.width * (max_size / image.height))
-            image = image.resize((new_width, new_height), Image.LANCZOS)
-        
-        # Get model for this style
-        model, face2paint = get_model(style)
-        
-        # Use GPU if available
-        device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-        model.to(device)
-        
-        # Transform the image
-        with torch.no_grad():  # Disable gradient calculation for inference
-            face_detector = get_dlib_face_detector()
-            landmarks = face_detector(image)
-            for landmark in landmarks:
-                face = align_and_crop_face(img, landmark, expand=1.3)
-            transformed = face2paint(model, face)
-        
-        # Apply style-specific effects
-        transformed = apply_style_effects(transformed, style)
-        
-        return index, transformed
-    
-    except Exception as e:
-        st.warning(f"Image transformation failed: {str(e)}")
-        return index, None
-
-def transform_to_character(images: List[Image.Image], style: str, api_key: str = None) -> List[Image.Image]:
-    """Transform multiple photos into cartoon/animated characters in parallel"""
+# Improved image transformation function without threading
+def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
+    """Transform photos into cartoon characters with memory optimization"""
     # Create progress indicator
     progress_placeholder = st.empty()
     progress_bar = st.progress(0)
     
-    # Prepare arguments for parallel processing
-    args = [(img, style, i) for i, img in enumerate(images)]
-    results = [None] * len(images)
+    transformed_images = []
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, len(images))) as executor:
-        # Submit all tasks
-        future_to_idx = {executor.submit(transform_single_image, arg): i for i, arg in enumerate(args)}
-        
-        # Process results as they complete
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_idx)):
-            original_idx = future_to_idx[future]
-            try:
-                idx, transformed_img = future.result()
-                if transformed_img:
-                    results[idx] = transformed_img
-                else:
-                    # Fallback to original if transformation failed
-                    results[idx] = images[idx]
-            except Exception as exc:
-                st.warning(f"Image {original_idx} generated an exception: {exc}")
-                results[original_idx] = images[original_idx]
-            
-            # Update progress
-            progress = (i + 1) / len(images)
+    # Process each image sequentially with proper memory management
+    for i, image in enumerate(images):
+        try:
+            # Update progress indicators
+            progress = (i) / len(images)
             progress_bar.progress(progress)
-            progress_placeholder.text(f"Transforming images: {i+1}/{len(images)} complete")
+            progress_placeholder.text(f"Transforming image {i+1}/{len(images)}...")
+            
+            # Resize image if too large to save memory
+            max_size = 512
+            if max(image.size) > max_size:
+                # Calculate new dimensions while preserving aspect ratio
+                if image.width > image.height:
+                    new_width = max_size
+                    new_height = int(image.height * (max_size / image.width))
+                else:
+                    new_height = max_size
+                    new_width = int(image.width * (max_size / image.height))
+                image = image.resize((new_width, new_height), Image.LANCZOS)
+            
+            # Convert to RGB if needed
+            if image.mode != 'RGB':
+                image = image.convert('RGB')
+            
+            # Process image with AnimeGAN
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            
+            # Load model only once outside the loop
+            if not hasattr(st.session_state, 'anime_model'):
+                with st.spinner("Loading transformation model..."):
+                    st.session_state.anime_model = torch.hub.load(
+                        "bryandlee/animegan2-pytorch:main", 
+                        "generator", 
+                        device=device
+                    ).eval()
+                    st.session_state.face2paint = torch.hub.load(
+                        "bryandlee/animegan2-pytorch:main", 
+                        "face2paint", 
+                        device=device
+                    )
+            
+            # Apply transformation
+            with torch.no_grad():  # Disable gradient calculation for inference
+                transformed = st.session_state.face2paint(
+                    st.session_state.anime_model, 
+                    image,
+                    size=512
+                )
+            
+            # Apply some basic enhancement
+            enhancer = ImageEnhance.Color(transformed)
+            transformed = enhancer.enhance(1.2)  # Slightly boost colors
+            
+            transformed_images.append(transformed)
+            
+            # Force garbage collection after each transformation
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                
+        except Exception as e:
+            st.warning(f"Image transformation failed: {str(e)}")
+            # Fallback to original image if transformation fails
+            transformed_images.append(image)
     
-    # Clear progress indicators
+    # Final progress update
+    progress = 1.0
+    progress_bar.progress(progress)
+    progress_placeholder.text(f"Transformation complete! {len(images)}/{len(images)} images processed")
+    
+    # Clear progress indicators after a short delay
+    time.sleep(1)
     progress_placeholder.empty()
     progress_bar.empty()
     
-    return results
+    return transformed_images
+
+# Modified face detection function with better error handling
+def get_dlib_face_detector(predictor_path: str = "shape_predictor_68_face_landmarks.dat"):
+    """Get or download the face landmark detector with improved error handling"""
+    try:
+        # Download the model if needed
+        if not os.path.isfile(predictor_path):
+            model_url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+            bz2_path = f"{predictor_path}.bz2"
+            
+            # 1. Download with requests
+            st.info("Downloading face detection model...")
+            response = requests.get(model_url, timeout=30)
+            with open(bz2_path, "wb") as f:
+                f.write(response.content)
+            
+            # 2. Extract using bz2 module
+            st.info("Extracting model...")
+            with bz2.BZ2File(bz2_path) as fr, open(predictor_path, "wb") as fw:
+                fw.write(fr.read())
+            
+            # Clean up .bz2 file
+            os.remove(bz2_path)
+
+        # Initialize detector and predictor
+        detector = dlib.get_frontal_face_detector()
+        shape_predictor = dlib.shape_predictor(predictor_path)
+
+        def detect_face_landmarks(img: Union[Image.Image, np.ndarray]):
+            if isinstance(img, Image.Image):
+                # Convert PIL Image to numpy array for dlib
+                img = np.array(img.convert('RGB'))
+            
+            # Ensure image is properly formatted for dlib
+            if img.dtype != np.uint8:
+                img = img.astype(np.uint8)
+            
+            faces = []
+            try:
+                # Convert to grayscale for better detection
+                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
+                
+                # Detect faces
+                dets = detector(gray)
+                for d in dets:
+                    shape = shape_predictor(img, d)
+                    faces.append(np.array([[v.x, v.y] for v in shape.parts()]))
+            except Exception as e:
+                st.warning(f"Face detection error: {str(e)}")
+            
+            return faces
+        
+        return detect_face_landmarks
+    
+    except Exception as e:
+        st.error(f"Error setting up face detector: {str(e)}")
+        
+        # Return a dummy function that returns empty list as fallback
+        def dummy_detector(img):
+            return []
+        
+        return dummy_detector
+
+# Simplified version without any style selection
+def apply_basic_enhancements(image: Image.Image) -> Image.Image:
+    """Apply basic image enhancements"""
+    try:
+        # Slightly increase color saturation
+        enhancer = ImageEnhance.Color(image)
+        image = enhancer.enhance(1.2)
+        
+        # Improve contrast slightly
+        contrast = ImageEnhance.Contrast(image)
+        image = contrast.enhance(1.1)
+        
+        return image
+    except Exception as e:
+        st.warning(f"Enhancement error: {str(e)}")
+        return image
     
 def generate_story(theme, characters, age_group, elements, morals, api_key):
     """Generate a bedtime story using HF LLM API"""
@@ -1223,6 +1173,7 @@ if st.session_state.current_step == 1:
         else:
             set_step(2)
 
+# Modified Step 2: Character Creation without style dropdown
 elif st.session_state.current_step == 2:
     # Step 2: Character Creation
     st.title("Step 2: Create Characters")
@@ -1239,20 +1190,13 @@ elif st.session_state.current_step == 2:
             name = col.text_input(f"Character {i+1} Name", value=f"Character {i+1}", key=f"name_{i}")
             character_names.append(name)
 
-    st.markdown("### Choose Character Style")
-    style_options = ["Cartoon", "Anime", "Fairy Tale", "Superhero", "Animal"]
-    selected_style = st.selectbox("Select a style for your characters", style_options)
-    
     if st.button("Transform into Characters", key="transform_chars"):
         st.session_state.character_names = character_names
         
         # Show a loading spinner while processing
-        with st.spinner("Transforming photos into characters... This may take a minute."):
-            # Process all images in parallel
-            transformed_images = transform_to_character(
-                st.session_state.uploaded_images, 
-                style=selected_style.lower()
-            )
+        with st.spinner("Transforming photos into cartoon characters... This may take a minute."):
+            # Process all images sequentially with optimized memory usage
+            transformed_images = transform_to_character(st.session_state.uploaded_images)
             st.session_state.character_images = transformed_images
         
         # Display the transformed characters
@@ -1270,11 +1214,12 @@ elif st.session_state.current_step == 2:
             set_step(1)
     with col2:
         if st.button("Continue to Story Generation ➡️", key="btn_to_step3"):
-            if not st.session_state.character_images:
+            if not hasattr(st.session_state, 'character_images') or not st.session_state.character_images:
                 st.error("Please transform your photos into characters first.")
             else:
                 set_step(3)
 
+# Modified Step 3: Story Generation without theme dropdown
 elif st.session_state.current_step == 3:
     # Step 3: Story Generation
     st.title("Step 3: Generate Your Bedtime Story")
@@ -1292,9 +1237,9 @@ elif st.session_state.current_step == 3:
     col1, col2 = st.columns(2)
     
     with col1:
-        story_themes = ["Adventure in the Forest", "Space Exploration", "Underwater Journey", 
-                        "Magical Kingdom", "Dinosaur Discovery", "Cloud Castle"]
-        st.session_state.story_theme = st.selectbox("Select a story theme", story_themes)
+        # Use a text input instead of dropdown for theme
+        story_theme = st.text_input("Enter a story theme", "Magical Adventure")
+        st.session_state.story_theme = story_theme
     
     with col2:
         age_groups = ["2-3 years", "3-5 years", "5-7 years", "7-10 years"]
@@ -1319,14 +1264,20 @@ elif st.session_state.current_step == 3:
                 api_key=st.session_state.hf_api_key
             )
             st.session_state.story = story
+            
+            # Extract title from the story
+            lines = story.split("\n")
+            for line in lines:
+                if line.strip().startswith("#") or line.strip().startswith("Title:"):
+                    title = line.replace("#", "").replace("Title:", "").strip()
+                    st.session_state.book_title = title
+                    break
     
     # Display the generated story
     if st.session_state.story:
         st.markdown("### Your Bedtime Story")
         
         with st.container():
-            # Use st.write for better HTML/markdown compatibility
-            st.write(f"**{st.session_state.story_theme}**")
             # Use an expander to ensure the story is fully visible
             with st.expander("Read the full story", expanded=True):
                 # Format the story with proper line breaks
@@ -1349,6 +1300,14 @@ elif st.session_state.current_step == 3:
                             api_key=st.session_state.hf_api_key
                         )
                         st.session_state.story = story
+                        
+                        # Re-extract title from the new story
+                        lines = story.split("\n")
+                        for line in lines:
+                            if line.strip().startswith("#") or line.strip().startswith("Title:"):
+                                title = line.replace("#", "").replace("Title:", "").strip()
+                                st.session_state.book_title = title
+                                break
     
     # Navigation buttons
     col1, col2 = st.columns(2)
