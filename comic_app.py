@@ -1061,8 +1061,8 @@ if st.session_state.current_step == 1:
     st.title("Step 1: Upload Photos")
     st.markdown("Upload photos of people to be transformed into story characters.")
     
-    if not st.session_state.hf_api_key:
-        st.info("Please enter your Hugging Face API Key in the sidebar to enable all features.")
+    # if not st.session_state.hf_api_key:
+    #     st.info("Please enter your Hugging Face API Key in the sidebar to enable all features.")
     
     uploaded_files = st.file_uploader("Choose images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
     
