@@ -288,7 +288,8 @@ def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
                         "face2paint", 
                         device=device
                     )
-            
+            # Store the original image for reference
+            original_image = image
             # Apply transformation
             with torch.no_grad():  # Disable gradient calculation for inference
                 transformed = st.session_state.face2paint(
