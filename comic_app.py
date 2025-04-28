@@ -192,88 +192,79 @@ def get_model(style: str) -> Tuple[Any, Any]:
     return thread_local.models[model_name]
 
 def extract_cartoon_face(original_image, transformed_image, padding_factor=0.5):
+     """
+    Detect face using OpenCV and crop it from the transformed image
     """
-    Extracts just the face area from the transformed cartoon image with improved accuracy.
+    import cv2
     
-    Args:
-        original_image: The original input image (for face detection)
-        transformed_image: The cartoon-transformed full image
-        padding_factor: Factor to expand the face bounding box by (0.5 = 50% padding)
+    # Convert images to numpy if they're PIL
+    if isinstance(image, Image.Image):
+        image_np = np.array(image.convert('RGB'))
+        image_np = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+    else:
+        image_np = image
+        
+    if isinstance(transformed_image, Image.Image):
+        transformed_np = np.array(transformed_image)
+        transformed_np = cv2.cvtColor(transformed_np, cv2.COLOR_RGB2BGR)
+        need_conversion = True
+    else:
+        transformed_np = transformed_image
+        need_conversion = False
     
-    Returns:
-        Image.Image: Cropped face from the cartoon image, or full image if no face detected
-    """
-    # Get face detector function
-    face_detector = get_dlib_face_detector()
+    # Get dimensions
+    orig_height, orig_width = image_np.shape[:2]
+    trans_height, trans_width = transformed_np.shape[:2]
     
-    # Ensure we're working with PIL Images
-    if not isinstance(original_image, Image.Image):
-        original_image = Image.fromarray(original_image)
-    if not isinstance(transformed_image, Image.Image):
-        transformed_image = Image.fromarray(transformed_image)
+    # Load pre-trained model
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
     
-    # Get original image dimensions
-    orig_width, orig_height = original_image.size
+    # Detect faces - convert to grayscale for better detection
+    gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
     
-    # Get transformed image dimensions
-    trans_width, trans_height = transformed_image.size
+    if len(faces) == 0:
+        # No face detected, return original
+        if need_conversion:
+            return transformed_image
+        else:
+            return cv2.cvtColor(transformed_np, cv2.COLOR_BGR2RGB)
     
-    # Detect faces in original image (convert to numpy array for detector)
-    orig_np = np.array(original_image.convert('RGB'))
-    faces = face_detector(orig_np)
+    # Use first face
+    x, y, w, h = faces[0]
     
-    if not faces or len(faces) == 0:
-        # No faces detected, return the full transformed image
-        return transformed_image
+    # Get center point of face
+    center_x_rel = (x + w/2) / orig_width
+    center_y_rel = (y + h/2) / orig_height
     
-    # Use the first detected face (assuming main subject)
-    face = faces[0]
+    # Apply to transformed image
+    trans_center_x = int(center_x_rel * trans_width)
+    trans_center_y = int(center_y_rel * trans_height)
     
-    # Calculate face bounding box in original image
-    min_x = float(np.min(face[:, 0]))
-    min_y = float(np.min(face[:, 1]))
-    max_x = float(np.max(face[:, 0]))
-    max_y = float(np.max(face[:, 1]))
+    # Calculate size in transformed image
+    trans_w = int((w / orig_width) * trans_width)
+    trans_h = int((h / orig_height) * trans_height)
     
-    # Calculate face width and height
-    face_width = max_x - min_x
-    face_height = max_y - min_y
+    # Add padding
+    padding_x = int(trans_w * padding_factor)
+    padding_y = int(trans_h * padding_factor)
     
-    # Calculate center point of face
-    center_x = min_x + (face_width / 2)
-    center_y = min_y + (face_height / 2)
+    # Calculate crop region
+    crop_x1 = max(0, trans_center_x - trans_w//2 - padding_x)
+    crop_y1 = max(0, trans_center_y - trans_h//2 - padding_y)
+    crop_x2 = min(trans_width, trans_center_x + trans_w//2 + padding_x)
+    crop_y2 = min(trans_height, trans_center_y + trans_h//2 + padding_y)
     
-    # Convert to relative coordinates (percentage of image dimensions)
-    rel_center_x = center_x / orig_width
-    rel_center_y = center_y / orig_height
-    rel_face_width = face_width / orig_width
-    rel_face_height = face_height / orig_height
-    
-    # Calculate the face position in the transformed image using relative coordinates
-    trans_center_x = rel_center_x * trans_width
-    trans_center_y = rel_center_y * trans_height
-    trans_face_width = rel_face_width * trans_width
-    trans_face_height = rel_face_height * trans_height
-    
-    # Add padding to face width and height
-    padded_width = trans_face_width * (1 + padding_factor * 2)
-    padded_height = trans_face_height * (1 + padding_factor * 2)
-    
-    # Calculate crop coordinates in transformed image
-    crop_x1 = max(0, int(trans_center_x - padded_width / 2))
-    crop_y1 = max(0, int(trans_center_y - padded_height / 2))
-    crop_x2 = min(trans_width, int(trans_center_x + padded_width / 2))
-    crop_y2 = min(trans_height, int(trans_center_y + padded_height / 2))
-    
-    # Ensure we don't have zero-sized crops
-    if crop_x1 >= crop_x2 or crop_y1 >= crop_y2:
-        return transformed_image
-    
-    # Crop the face from the transformed image
-    face_crop = transformed_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
-    
-    return face_crop
-    
+    # Crop the face
+    if need_conversion:
+        # Convert back to RGB and PIL
+        transformed_rgb = cv2.cvtColor(transformed_np, cv2.COLOR_BGR2RGB)
+        transformed_pil = Image.fromarray(transformed_rgb)
+        return transformed_pil.crop((crop_x1, crop_y1, crop_x2, crop_y2))
+    else:
+        cropped = transformed_np[crop_y1:crop_y2, crop_x1:crop_x2]
+        return cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB)
+        
 # Improved image transformation function without threading
 def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
     """Transform photos into cartoon characters with memory optimization"""
