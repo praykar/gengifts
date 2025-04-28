@@ -192,11 +192,9 @@ def get_model(style: str) -> Tuple[Any, Any]:
     return thread_local.models[model_name]
 
 def extract_cartoon_face(original_image, transformed_image, padding_factor=0.5):
-     """
+    """
     Detect face using OpenCV and crop it from the transformed image
     """
-    import cv2
-    
     # Convert images to numpy if they're PIL
     if isinstance(image, Image.Image):
         image_np = np.array(image.convert('RGB'))
