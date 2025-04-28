@@ -28,6 +28,7 @@ import scipy.ndimage
 import dlib
 import collections
 import bz2
+import gc
 # Create a thread-local storage for models to avoid loading them multiple times
 thread_local = threading.local()
 # Set page configuration
