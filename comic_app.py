@@ -329,7 +329,7 @@ def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
             
             # Extract just the face from the transformed image
             face_only = extract_cartoon_face(original_image, transformed, padding_factor=0.5)
-            
+            face_only = get_dlib_face_detector()
             # Add to results
             transformed_images.append(face_only)  # Store face-only result
             
@@ -354,85 +354,6 @@ def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
     progress_bar.empty()
     
     return transformed_images
-
-# Modified face detection function with better error handling
-def get_dlib_face_detector(predictor_path: str = "shape_predictor_68_face_landmarks.dat"):
-    """Get or download the face landmark detector with improved error handling"""
-    try:
-        # Download the model if needed
-        if not os.path.isfile(predictor_path):
-            model_url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
-            bz2_path = f"{predictor_path}.bz2"
-            
-            # 1. Download with requests
-            st.info("Downloading face detection model...")
-            response = requests.get(model_url, timeout=30)
-            with open(bz2_path, "wb") as f:
-                f.write(response.content)
-            
-            # 2. Extract using bz2 module
-            st.info("Extracting model...")
-            with bz2.BZ2File(bz2_path) as fr, open(predictor_path, "wb") as fw:
-                fw.write(fr.read())
-            
-            # Clean up .bz2 file
-            os.remove(bz2_path)
-
-        # Initialize detector and predictor
-        detector = dlib.get_frontal_face_detector()
-        shape_predictor = dlib.shape_predictor(predictor_path)
-
-        def detect_face_landmarks(img: Union[Image.Image, np.ndarray]):
-            if isinstance(img, Image.Image):
-                # Convert PIL Image to numpy array for dlib
-                img = np.array(img.convert('RGB'))
-            
-            # Ensure image is properly formatted for dlib
-            if img.dtype != np.uint8:
-                img = img.astype(np.uint8)
-            
-            faces = []
-            try:
-                # Convert to grayscale for better detection
-                gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY) if len(img.shape) == 3 else img
-                
-                # Detect faces
-                dets = detector(gray)
-                for d in dets:
-                    shape = shape_predictor(img, d)
-                    faces.append(np.array([[v.x, v.y] for v in shape.parts()]))
-            except Exception as e:
-                st.warning(f"Face detection error: {str(e)}")
-            
-            return faces
-        
-        return detect_face_landmarks
-    
-    except Exception as e:
-        st.error(f"Error setting up face detector: {str(e)}")
-        
-        # Return a dummy function that returns empty list as fallback
-        def dummy_detector(img):
-            return []
-        
-        return dummy_detector
-
-# Simplified version without any style selection
-def apply_basic_enhancements(image: Image.Image) -> Image.Image:
-    """Apply basic image enhancements"""
-    try:
-        # Slightly increase color saturation
-        enhancer = ImageEnhance.Color(image)
-        image = enhancer.enhance(1.2)
-        
-        # Improve contrast slightly
-        contrast = ImageEnhance.Contrast(image)
-        image = contrast.enhance(1.1)
-        
-        return image
-    except Exception as e:
-        st.warning(f"Enhancement error: {str(e)}")
-        return image
     
 def generate_story(theme, characters, age_group, elements, morals, api_key):
     """Generate a bedtime story using HF LLM API"""
