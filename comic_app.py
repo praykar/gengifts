@@ -193,7 +193,7 @@ def get_model(style: str) -> Tuple[Any, Any]:
 
 def extract_cartoon_face(original_image, transformed_image, padding_factor=0.5):
     """
-    Extracts just the face area from the transformed cartoon image.
+    Extracts just the face area from the transformed cartoon image with improved accuracy.
     
     Args:
         original_image: The original input image (for face detection)
@@ -206,8 +206,21 @@ def extract_cartoon_face(original_image, transformed_image, padding_factor=0.5):
     # Get face detector function
     face_detector = get_dlib_face_detector()
     
-    # Detect faces in original image
-    faces = face_detector(original_image)
+    # Ensure we're working with PIL Images
+    if not isinstance(original_image, Image.Image):
+        original_image = Image.fromarray(original_image)
+    if not isinstance(transformed_image, Image.Image):
+        transformed_image = Image.fromarray(transformed_image)
+    
+    # Get original image dimensions
+    orig_width, orig_height = original_image.size
+    
+    # Get transformed image dimensions
+    trans_width, trans_height = transformed_image.size
+    
+    # Detect faces in original image (convert to numpy array for detector)
+    orig_np = np.array(original_image.convert('RGB'))
+    faces = face_detector(orig_np)
     
     if not faces or len(faces) == 0:
         # No faces detected, return the full transformed image
@@ -216,24 +229,45 @@ def extract_cartoon_face(original_image, transformed_image, padding_factor=0.5):
     # Use the first detected face (assuming main subject)
     face = faces[0]
     
-    # Calculate face bounding box
-    min_x = np.min(face[:, 0])
-    min_y = np.min(face[:, 1])
-    max_x = np.max(face[:, 0])
-    max_y = np.max(face[:, 1])
+    # Calculate face bounding box in original image
+    min_x = float(np.min(face[:, 0]))
+    min_y = float(np.min(face[:, 1]))
+    max_x = float(np.max(face[:, 0]))
+    max_y = float(np.max(face[:, 1]))
     
-    # Add padding
-    width = max_x - min_x
-    height = max_y - min_y
-    padding_x = int(width * padding_factor)
-    padding_y = int(height * padding_factor)
+    # Calculate face width and height
+    face_width = max_x - min_x
+    face_height = max_y - min_y
     
-    # Ensure we stay within image boundaries
-    img_width, img_height = transformed_image.size
-    crop_x1 = max(0, min_x - padding_x)
-    crop_y1 = max(0, min_y - padding_y)
-    crop_x2 = min(img_width, max_x + padding_x)
-    crop_y2 = min(img_height, max_y + padding_y)
+    # Calculate center point of face
+    center_x = min_x + (face_width / 2)
+    center_y = min_y + (face_height / 2)
+    
+    # Convert to relative coordinates (percentage of image dimensions)
+    rel_center_x = center_x / orig_width
+    rel_center_y = center_y / orig_height
+    rel_face_width = face_width / orig_width
+    rel_face_height = face_height / orig_height
+    
+    # Calculate the face position in the transformed image using relative coordinates
+    trans_center_x = rel_center_x * trans_width
+    trans_center_y = rel_center_y * trans_height
+    trans_face_width = rel_face_width * trans_width
+    trans_face_height = rel_face_height * trans_height
+    
+    # Add padding to face width and height
+    padded_width = trans_face_width * (1 + padding_factor * 2)
+    padded_height = trans_face_height * (1 + padding_factor * 2)
+    
+    # Calculate crop coordinates in transformed image
+    crop_x1 = max(0, int(trans_center_x - padded_width / 2))
+    crop_y1 = max(0, int(trans_center_y - padded_height / 2))
+    crop_x2 = min(trans_width, int(trans_center_x + padded_width / 2))
+    crop_y2 = min(trans_height, int(trans_center_y + padded_height / 2))
+    
+    # Ensure we don't have zero-sized crops
+    if crop_x1 >= crop_x2 or crop_y1 >= crop_y2:
+        return transformed_image
     
     # Crop the face from the transformed image
     face_crop = transformed_image.crop((crop_x1, crop_y1, crop_x2, crop_y2))
@@ -305,7 +339,7 @@ def transform_to_character(images: List[Image.Image]) -> List[Image.Image]:
             transformed = enhancer.enhance(1.2)  # Slightly boost colors
             
             # Extract just the face from the transformed image
-            face_only = extract_cartoon_face(original_image, transformed)
+            face_only = extract_cartoon_face(original_image, transformed, padding_factor=0.5)
             
             # Add to results
             transformed_images.append(face_only)  # Store face-only result
