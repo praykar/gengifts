@@ -1,10 +1,19 @@
+import sys
+import asyncio
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+else:
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+
+# Disable Streamlit file watcher
+import os
+os.environ["STREAMLIT_SERVER_ENABLE_FILE_WATCHER"] = "false"
 import streamlit as st
 import requests
 import io
 import base64
 from PIL import Image, ImageFilter, ImageEnhance, ImageDraw, ImageFont, ImageFile
 import torch
-import os
 import json
 import time
 import random
