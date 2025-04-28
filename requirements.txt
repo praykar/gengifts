@@ -4,7 +4,7 @@ pillow
 reportlab
 ebooklib
 scipy
-opencv-python
+opencv-python-headless
 face_recognition @ git+https://github.com/praykar/face_recognition
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.6.0+cpu
