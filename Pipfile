@@ -4,17 +4,16 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-torch = "*"
-torchvision = "*"
-reportlab = "*"
-ebooklib = "*"
-
-[dev-packages]
 streamlit = "*"
 requests = "*"
 pillow = "*"
-ebooklib = "*"
 reportlab = "*"
+ebooklib = "*"
+torch = "*"
+torchvision = "*"
+
+[dev-packages]
 
 [requires]
 python_version = "3.13"
+python_full_version = "3.13.2"
